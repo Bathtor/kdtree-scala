@@ -43,7 +43,7 @@ case class RegionIntersection[A](regions: Seq[Region[A]]) extends Region[A] {
 }
 
 class RegionBuilder[A] {
-  var regions = new scala.collection.mutable.ArrayBuffer[Region[A]]
+  val regions = scala.collection.mutable.ArrayBuffer.empty[Region[A]]
 
   def addRegion(region: Region[A]) = {
     regions += region
@@ -62,7 +62,7 @@ class RegionBuilder[A] {
   def build: Region[A] = regions.length match {
     case 0 => EntireSpace()
     case 1 => regions.head
-    case _ => RegionIntersection(regions)
+    case _ => RegionIntersection(regions.toSeq)
   }
 }
 

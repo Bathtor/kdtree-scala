@@ -3,12 +3,13 @@ package com.thesamet.spatial
 import scala.annotation.tailrec
 import scala.collection.generic.CanBuildFrom
 import scala.collection.mutable.{ArrayBuffer, Builder}
-import scala.collection.{IterableLike, MapLike}
 import scala.language.implicitConversions
 import scala.math.Ordering.Implicits._
+import scala.collection.mutable
 
 class KDTree[A] private (root: KDTreeNode[A, Boolean])(implicit ord: DimensionalOrdering[A])
-  extends Iterable[A] with IterableLike[A, KDTree[A]] with Serializable {
+  extends Iterable[A]
+  with Serializable {
   override def seq = this
 
   override def size: Int = root.size
@@ -21,28 +22,28 @@ class KDTree[A] private (root: KDTreeNode[A, Boolean])(implicit ord: Dimensional
     root.findNearest(x, n) map (_._1)
 
   def regionQuery(region: Region[A]): Seq[A] = root.regionQuery(region) map (_._1)
-
-  override def newBuilder: Builder[A, KDTree[A]] = KDTree.newBuilder
 }
 
 class KDTreeMap[A, B] private (root: KDTreeNode[A, B])(implicit ord: DimensionalOrdering[A])
-  extends Map[A, B] with MapLike[A, B, KDTreeMap[A, B]] with Serializable {
+  extends Serializable {
 
-  override def empty: KDTreeMap[A, B] = KDTreeMap.empty[A, B](ord)
+  def empty: KDTreeMap[A, B] = KDTreeMap.empty[A, B](ord)
 
-  override def size: Int = root.size
+  def size: Int = root.size
 
-  override def iterator: Iterator[(A, B)] = root.toStream.iterator
+  def iterator: Iterator[(A, B)] = root.toStream.iterator
 
   def get(x: A): Option[B] = root.get(x)
 
-  def findNearest[R](x: A, n: Int)(implicit metric: Metric[A, R], numeric: Numeric[R]): Seq[(A, B)] =
+  def findNearest[R](x: A, n: Int)(implicit
+      metric: Metric[A, R],
+      numeric: Numeric[R]): Seq[(A, B)] =
     root.findNearest(x, n)
 
   def regionQuery(region: Region[A]): Seq[(A, B)] = root.regionQuery(region)
 
-  def +[B1 >: B](kv: (A, B1)): KDTreeMap[A, B1] = KDTreeMap.fromSeq(toSeq ++ Seq(kv))
-  def -(key: A): KDTreeMap[A, B] = KDTreeMap.fromSeq(toSeq.filter(_._1 != key))
+  def +[B1 >: B](kv: (A, B1)): KDTreeMap[A, B1] = KDTreeMap.fromSeq(iterator.toSeq ++ Seq(kv))
+  def -(key: A): KDTreeMap[A, B] = KDTreeMap.fromSeq(iterator.toSeq.filter(_._1 != key))
 }
 
 sealed trait KDTreeNode[A, B] extends Serializable {
@@ -50,10 +51,11 @@ sealed trait KDTreeNode[A, B] extends Serializable {
   def toStringSeq(indent: Int): Seq[String]
   def size: Int
   def isEmpty: Boolean
-  def findNearest0[R](x: A, n: Int, skipParent: KDTreeNode[A, B], values: Seq[((A, B), R)])(
-    implicit metric: Metric[A, R], ord: Ordering[R]): Seq[((A, B), R)]
+  def findNearest0[R](x: A, n: Int, skipParent: KDTreeNode[A, B], values: Seq[((A, B), R)])(implicit
+      metric: Metric[A, R],
+      ord: Ordering[R]): Seq[((A, B), R)]
   def findNearest[R](x: A, n: Int)(implicit metric: Metric[A, R], ord: Ordering[R]): Seq[(A, B)]
-  def toStream: Stream[(A, B)]
+  def toStream: LazyList[(A, B)]
   def toSeq: Seq[(A, B)]
   def regionQuery(region: Region[A])(implicit ord: DimensionalOrdering[A]): Seq[(A, B)]
 
@@ -67,19 +69,25 @@ sealed trait KDTreeNode[A, B] extends Serializable {
 }
 
 case class KDTreeInnerNode[A, B](
-  dim: Int, key: A, value: B, below: KDTreeNode[A, B], above: KDTreeNode[A, B])(
-    ordering: Ordering[A]) extends KDTreeNode[A, B] with Serializable {
-  def toStringSeq(indent: Int) = {
+    dim: Int,
+    key: A,
+    value: B,
+    below: KDTreeNode[A, B],
+    above: KDTreeNode[A, B])(ordering: Ordering[A])
+  extends KDTreeNode[A, B]
+  with Serializable {
+
+  override def toStringSeq(indent: Int) = {
     val i = "  " * indent
 
-    Seq(i + "size=%d dim=%d key=%s ".format(size, dim, key),
-      i + "Below:") ++ below.toStringSeq(indent + 1) ++ Seq(i + "Above:") ++
+    Seq(i + "size=%d dim=%d key=%s ".format(size, dim, key), i + "Below:") ++ below.toStringSeq(
+      indent + 1) ++ Seq(i + "Above:") ++
       above.toStringSeq(indent + 1)
   }
 
-  val size = below.size + above.size + 1
+  override val size = below.size + above.size + 1
 
-  def isEmpty = false
+  override def isEmpty = false
 
   def isBelow(x: A) = ordering.lt(x, key)
 
@@ -87,16 +95,23 @@ case class KDTreeInnerNode[A, B](
 
   def isEquiv(x: A) = ordering.equiv(x, key)
 
-  def findNearest[R](x: A, n: Int)(implicit metric: Metric[A, R], ord: Ordering[R]): Seq[(A, B)] = {
+  override def findNearest[R](x: A, n: Int)(implicit
+      metric: Metric[A, R],
+      ord: Ordering[R]): Seq[(A, B)] = {
     // Build initial set of candidates from the smallest subtree containing x with at least n
     // points.
     val minParent = KDTreeNode.findMinimalParent(this, x, withSize = n)
-    val values = minParent.toSeq.map { p => (p, metric.distance(x, p._1))}.sortBy(_._2).take(n)
+    val values = minParent.toSeq.map { p => (p, metric.distance(x, p._1)) }.sortBy(_._2).take(n)
     findNearest0(x, n, minParent, values) map { _._1 }
   }
 
-  def findNearest0[R](x: A, n: Int, skipParent: KDTreeNode[A, B], values: Seq[((A, B), R)])(
-    implicit metric: Metric[A, R], ord: Ordering[R]): Seq[((A, B), R)] = {
+  override def findNearest0[R](
+      x: A,
+      n: Int,
+      skipParent: KDTreeNode[A, B],
+      values: Seq[((A, B), R)])(implicit
+      metric: Metric[A, R],
+      ord: Ordering[R]): Seq[((A, B), R)] = {
     if (skipParent eq this) values
     else {
       val myDist = metric.distance(key, x)
@@ -120,36 +135,47 @@ case class KDTreeInnerNode[A, B](
     }
   }
 
-  def regionQuery(region: Region[A])(implicit ord: DimensionalOrdering[A]): Seq[(A, B)] = {
+  override def regionQuery(region: Region[A])(implicit ord: DimensionalOrdering[A]): Seq[(A, B)] = {
     (if (region.overlapsWith(BelowHyperplane(key, dim)))
-      below.regionQuery(region) else Nil) ++
+       below.regionQuery(region)
+     else Nil) ++
       (if (region.contains(key))
-        Seq((key, value)) else Nil) ++
+         Seq((key, value))
+       else Nil) ++
       (if (region.overlapsWith(AboveHyperplane(key, dim)))
-        above.regionQuery(region) else Nil)
+         above.regionQuery(region)
+       else Nil)
   }
 
-  def toStream: Stream[(A, B)] = below.toStream ++ Stream((key, value)) ++ above.toStream
+  override def toStream: LazyList[(A, B)] =
+    below.toStream #::: LazyList((key, value)) #::: above.toStream
 
-  def toSeq: Seq[(A, B)] = below.toSeq ++ Seq((key, value)) ++ above.toSeq
+  override def toSeq: Seq[(A, B)] = below.toSeq ++ Seq((key, value)) ++ above.toSeq
 }
 
 case class KDTreeEmpty[A, B]() extends KDTreeNode[A, B] with Serializable {
-  def toStringSeq(indent: Int) = Seq(("  " * indent) + "[Empty]")
-  def size = 0
-  def isEmpty = true
-  def findNearest[R](x: A, n: Int)(implicit metric: Metric[A, R], ord: Ordering[R]): Seq[(A, B)] =
+  override def toStringSeq(indent: Int) = Seq(("  " * indent) + "[Empty]")
+  override def size = 0
+  override def isEmpty = true
+  override def findNearest[R](x: A, n: Int)(implicit
+      metric: Metric[A, R],
+      ord: Ordering[R]): Seq[(A, B)] =
     Seq.empty
-  def findNearest0[R](x: A, n: Int, skipParent: KDTreeNode[A, B], values: Seq[((A, B), R)])(
-    implicit metric: Metric[A, R], ord: Ordering[R]): Seq[((A, B), R)] = values
-  def toSeq: Seq[(A, B)] = Seq.empty
-  def toStream: Stream[(A, B)] = Stream.empty
-  def regionQuery(region: Region[A])(implicit ord: DimensionalOrdering[A]): Seq[(A, B)] = Seq.empty
+  override def findNearest0[R](
+      x: A,
+      n: Int,
+      skipParent: KDTreeNode[A, B],
+      values: Seq[((A, B), R)])(implicit metric: Metric[A, R], ord: Ordering[R]): Seq[((A, B), R)] =
+    values
+  override def toSeq: Seq[(A, B)] = Seq.empty
+  override def toStream: LazyList[(A, B)] = LazyList.empty
+  override def regionQuery(region: Region[A])(implicit ord: DimensionalOrdering[A]): Seq[(A, B)] =
+    Seq.empty
 }
 
 object KDTreeNode {
-  def buildTreeNode[A, B](depth: Int, points: Seq[(A, B)])(
-    implicit ord: DimensionalOrdering[A]): KDTreeNode[A, B] = {
+  def buildTreeNode[A, B](depth: Int, points: Seq[(A, B)])(implicit
+      ord: DimensionalOrdering[A]): KDTreeNode[A, B] = {
     def findSplit(points: Seq[(A, B)], i: Int): ((A, B), Seq[(A, B)], Seq[(A, B)]) = {
       val sp = points.sortBy(_._1)(ord.orderingBy(i))
       val medIndex = sp.length / 2
@@ -161,13 +187,19 @@ object KDTreeNode {
       val i = depth % ord.dimensions
       val ((key, value), below, above) = findSplit(points, i)
       KDTreeInnerNode(
-        i, key, value, buildTreeNode(depth + 1, below),
+        i,
+        key,
+        value,
+        buildTreeNode(depth + 1, below),
         buildTreeNode(depth + 1, above))(ord.orderingBy(i))
     }
   }
 
   @tailrec
-  def findMinimalParent[A, B](node: KDTreeInnerNode[A, B], x: A, withSize: Int): KDTreeInnerNode[A, B] = if (node.key == x) node
+  def findMinimalParent[A, B](
+      node: KDTreeInnerNode[A, B],
+      x: A,
+      withSize: Int): KDTreeInnerNode[A, B] = if (node.key == x) node
   else {
     val next = if (node.isBelow(x)) node.below else node.above
     if (next.size < withSize) node
@@ -184,18 +216,15 @@ object KDTree {
   }
 
   def newBuilder[A](implicit ord: DimensionalOrdering[A]): Builder[A, KDTree[A]] =
-    new ArrayBuffer[A]() mapResult (x => KDTree.fromSeq(x))
-
-  implicit def canBuildFrom[B](implicit ordB: DimensionalOrdering[B]): CanBuildFrom[KDTree[_], B, KDTree[B]] = new CanBuildFrom[KDTree[_], B, KDTree[B]] {
-    def apply(): Builder[B, KDTree[B]] = newBuilder(ordB)
-    def apply(from: KDTree[_]): Builder[B, KDTree[B]] = newBuilder(ordB)
-  }
+    Seq.newBuilder[A] mapResult (x => KDTree.fromSeq(x))
 }
 
 object KDTreeMap {
+
   def empty[A, B](implicit ord: DimensionalOrdering[A]): KDTreeMap[A, B] = KDTreeMap()
 
-  def apply[A, B](points: (A, B)*)(implicit ord: DimensionalOrdering[A]): KDTreeMap[A, B] = fromSeq(points)
+  def apply[A, B](points: (A, B)*)(implicit ord: DimensionalOrdering[A]): KDTreeMap[A, B] = fromSeq(
+    points)
 
   def fromSeq[A, B](points: Seq[(A, B)])(implicit ord: DimensionalOrdering[A]): KDTreeMap[A, B] =
     new KDTreeMap(KDTreeNode.buildTreeNode(0, points))
